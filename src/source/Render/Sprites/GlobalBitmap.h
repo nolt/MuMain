@@ -23,7 +23,8 @@ struct BITMAP_t
     GLuint BitmapIndex;
     wchar_t FileName[MAX_BITMAP_FILE_NAME];
     // Logical size. For textures carrying the upscale marker (see ReadUpscaleMarker in
-    // GlobalBitmap.cpp) this is smaller than the uploaded texture and than Buffer's row layout.
+    // GlobalBitmap.cpp) this is smaller than the uploaded texture, and Buffer is released after
+    // upload (nullptr, BufferStorage empty).
     // Bitmaps used as CPU-drawn canvases (BITMAP_FONT = Interface/FontInput, BITMAP_GUILD =
     // Interface/guild: written through Buffer with Width as row stride, then UpdateTexture) must
     // therefore never carry the marker.

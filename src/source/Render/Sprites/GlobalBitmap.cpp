@@ -104,6 +104,19 @@ namespace
         return (uiFilter == GL_LINEAR) ? RHI::TexFilter::Linear : RHI::TexFilter::Nearest;
     }
 
+    // The CPU copy of an upscaled texture is 16x (4x marker) the original and nothing reads it after
+    // upload -- only the canvas bitmaps (FONT, GUILD) are redrawn through Buffer, and those never
+    // carry the marker. Keeping it pushed the 32-bit LAA client past 3.3 GB of address space.
+    // Returns the freed byte count so the caller can keep m_dwUsedTextureMemory in step
+    // (UnloadImage later subtracts BufferStorage.size(), which is then 0).
+    std::size_t ReleaseUploadedPixels(BITMAP_t& bitmap)
+    {
+        const std::size_t freed = bitmap.BufferStorage.size();
+        std::vector<std::uint8_t>().swap(bitmap.BufferStorage);
+        bitmap.Buffer = nullptr;
+        return freed;
+    }
+
     std::string NarrowPath(const std::wstring& wide)
     {
         std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
@@ -741,6 +754,10 @@ bool CGlobalBitmap::OpenJpegTurbo(GLuint uiBitmapIndex, const std::wstring& file
     desc.filter = PickFilter(uiFilter, scale);
     desc.wrap = (uiWrapMode == GL_REPEAT) ? RHI::TexWrap::Repeat : RHI::TexWrap::Clamp;
     pNewBitmap->TextureNumber = RHI::CreateTexture(desc, pNewBitmap->Buffer).id;
+    if (scale > 1)
+    {
+        m_dwUsedTextureMemory -= static_cast<std::uint32_t>(ReleaseUploadedPixels(*pNewBitmap));
+    }
 
     m_mapBitmap.insert(type_bitmap_map::value_type(uiBitmapIndex, std::move(pNewBitmap)));
 
@@ -824,6 +841,10 @@ bool CGlobalBitmap::OpenTga(GLuint uiBitmapIndex, const std::wstring& filename, 
     desc.filter = PickFilter(uiFilter, scale);
     desc.wrap = (uiWrapMode == GL_REPEAT) ? RHI::TexWrap::Repeat : RHI::TexWrap::Clamp;
     pNewBitmap->TextureNumber = RHI::CreateTexture(desc, pNewBitmap->Buffer).id;
+    if (scale > 1)
+    {
+        m_dwUsedTextureMemory -= static_cast<std::uint32_t>(ReleaseUploadedPixels(*pNewBitmap));
+    }
 
     m_mapBitmap.insert(type_bitmap_map::value_type(uiBitmapIndex, std::move(pNewBitmap)));
 
