@@ -15,6 +15,7 @@
 #include "Core/Utilities/Log/ErrorReport.h"
 #include <SDL3/SDL.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cstring>
 #include <cstdio>
@@ -1066,21 +1067,66 @@ void DrawIndexed(Topology topology, uint32_t indexCount, uint32_t firstIndex)
 // ---- Textures ----
 // glGenTextures/glDeleteTextures/glTexImage2D/glTexSubImage2D/glTexParameteri are all GL 1.1/1.3
 // core (exported directly by opengl32.dll), same as glBindTexture in BindState.cpp -- no
-// SDL_GL_GetProcAddress loading needed here.
+// SDL_GL_GetProcAddress loading needed here. The exception is glGenerateMipmap (GL 3.0), loaded
+// below for TexFilter::Trilinear.
+#ifndef GL_TEXTURE_MAX_ANISOTROPY
+#define GL_TEXTURE_MAX_ANISOTROPY     0x84FE
+#endif
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY 0x84FF
+#endif
+typedef void (APIENTRY* PFNGLGENERATEMIPMAPPROC)(GLenum target);
+
+namespace {
+    PFNGLGENERATEMIPMAPPROC fn_glGenerateMipmap = nullptr;
+    float g_MaxAnisotropy = 1.f;
+
+    // Textures created with a mip chain, so UpdateTexture knows to rebuild it.
+    std::unordered_set<GLuint> g_MipmappedTextures;
+
+    // Trilinear falls back to plain Linear if glGenerateMipmap is missing (GL >= 3.3 floor makes
+    // that a broken-driver case only). Anisotropy is core in 4.6 and near-universal as
+    // EXT/ARB_texture_filter_anisotropic; querying the max leaves 1.0 (off) when unsupported.
+    bool LoadMipmapGLFunctions()
+    {
+        static bool probed = false;
+        if (!probed)
+        {
+            probed = true;
+            fn_glGenerateMipmap = (PFNGLGENERATEMIPMAPPROC)SDL_GL_GetProcAddress("glGenerateMipmap");
+            GLfloat maxAniso = 0.f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maxAniso);
+            if (glGetError() == GL_NO_ERROR && maxAniso > 1.f)
+                g_MaxAnisotropy = maxAniso;
+        }
+        return fn_glGenerateMipmap != nullptr;
+    }
+}
+
 TextureHandle CreateTexture(const TextureDesc& desc, const void* initialPixelsRGBA)
 {
     GLuint id = 0;
     glGenTextures(1, &id);
     BindTexture2D(0, id);
 
-    const GLint filter = (desc.filter == TexFilter::Linear) ? GL_LINEAR : GL_NEAREST;
+    const bool mipmapped = (desc.filter == TexFilter::Trilinear) && LoadMipmapGLFunctions();
+    const GLint magFilter = (desc.filter == TexFilter::Nearest) ? GL_NEAREST : GL_LINEAR;
+    const GLint minFilter = mipmapped ? GL_LINEAR_MIPMAP_LINEAR : magFilter;
     const GLint wrap    = (desc.wrap == TexWrap::Repeat) ? GL_REPEAT : GL_CLAMP_TO_EDGE;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magFilter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, desc.width, desc.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, initialPixelsRGBA);
+
+    if (mipmapped)
+    {
+        if (g_MaxAnisotropy > 1.f)
+            glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, g_MaxAnisotropy);
+        fn_glGenerateMipmap(GL_TEXTURE_2D);
+        g_MipmappedTextures.insert(id);
+    }
 
     return TextureHandle{ id };
 }
@@ -1097,6 +1143,8 @@ void UpdateTexture(TextureHandle handle, int x, int y, int w, int h, const void*
     IR::Flush(IR::FlushCause::Texture);
     BindTexture2D(0, handle.id);
     glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixelsRGBA);
+    if (g_MipmappedTextures.count(handle.id))
+        fn_glGenerateMipmap(GL_TEXTURE_2D);
 }
 
 void DestroyTexture(TextureHandle handle)
@@ -1104,6 +1152,7 @@ void DestroyTexture(TextureHandle handle)
     if (!handle.IsValid()) return;
     GLuint id = handle.id;
     glDeleteTextures(1, &id);
+    g_MipmappedTextures.erase(id);
     // Matches BindState.h's documented contract: a delete affecting a cached bind must
     // invalidate the cache, or a later Gen reusing this numeric id would be wrongly treated as
     // already-bound (the exact bug class that produced DXP-22's "infinity shadow").

@@ -72,6 +72,38 @@ namespace
         return std::min<int>(result, maxValue);
     }
 
+    // Upscaled-art marker: 'M' 'U' 'X' <scale> written over the first 4 header bytes the loader
+    // otherwise skips (OZJ: 24-byte prefix, OZT: 4-byte prefix). Original files carry a copy of
+    // the JPEG SOI / TGA header there, so unmarked files read as scale 1 and load exactly as before.
+    // Only 2 and 4 are accepted: a power-of-two factor keeps NextPowerOfTwo padding proportional,
+    // so every UV the game derives from Width/Height stays valid.
+    int ReadUpscaleMarker(const std::vector<unsigned char>& fileData)
+    {
+        if (fileData.size() < 4 || fileData[0] != 'M' || fileData[1] != 'U' || fileData[2] != 'X')
+            return 1;
+        const int scale = fileData[3];
+        return (scale == 2 || scale == 4) ? scale : 1;
+    }
+
+    // A marked texture is uploaded at full resolution, but the bitmap reports its original
+    // (logical) size -- the size all game code was written against: terrain UVs (64 texels per
+    // tile), effect sprite and grass dimensions, UI pixel coordinates. Returns 1 if the texture
+    // is too small for the claimed scale, i.e. the marker is not trustworthy.
+    int ValidUpscale(int scale, int textureWidth, int textureHeight)
+    {
+        return (textureWidth >= scale && textureHeight >= scale) ? scale : 1;
+    }
+
+    // Upscaled textures are always drawn minified relative to their stored resolution, so they get
+    // mipmaps + anisotropy regardless of the filter the caller asked for; without that, 4x detail
+    // shimmers at a distance (and nearest-filtered terrain tiles would alias badly).
+    RHI::TexFilter PickFilter(GLuint uiFilter, int scale)
+    {
+        if (scale > 1)
+            return RHI::TexFilter::Trilinear;
+        return (uiFilter == GL_LINEAR) ? RHI::TexFilter::Linear : RHI::TexFilter::Nearest;
+    }
+
     std::string NarrowPath(const std::wstring& wide)
     {
         std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> conv;
@@ -647,6 +679,7 @@ bool CGlobalBitmap::OpenJpegTurbo(GLuint uiBitmapIndex, const std::wstring& file
 
     const int textureWidth = NextPowerOfTwo(jpegWidth, MAX_WIDTH);
     const int textureHeight = NextPowerOfTwo(jpegHeight, MAX_HEIGHT);
+    const int scale = ValidUpscale(ReadUpscaleMarker(jpegBuf), textureWidth, textureHeight);
 
     auto pNewBitmap = std::make_unique<BITMAP_t>();
 
@@ -655,8 +688,8 @@ bool CGlobalBitmap::OpenJpegTurbo(GLuint uiBitmapIndex, const std::wstring& file
     wcsncpy(pNewBitmap->FileName, filename.c_str(), MAX_BITMAP_FILE_NAME - 1);
     pNewBitmap->FileName[MAX_BITMAP_FILE_NAME - 1] = L'\0';
 
-    pNewBitmap->Width = static_cast<float>(textureWidth);
-    pNewBitmap->Height = static_cast<float>(textureHeight);
+    pNewBitmap->Width = static_cast<float>(textureWidth / scale);
+    pNewBitmap->Height = static_cast<float>(textureHeight / scale);
     // DXP-12: RHI's texture format contract is RGBA8 always (DXGI has no 24-bit RGB format), so
     // the RGB->RGBA expansion (alpha=255) that used to happen implicitly on the GL side (upload
     // format=GL_RGB into an internalformat=GL_RGBA8 texture) now happens explicitly here, in the
@@ -705,7 +738,7 @@ bool CGlobalBitmap::OpenJpegTurbo(GLuint uiBitmapIndex, const std::wstring& file
     RHI::TextureDesc desc;
     desc.width = textureWidth;
     desc.height = textureHeight;
-    desc.filter = (uiFilter == GL_LINEAR) ? RHI::TexFilter::Linear : RHI::TexFilter::Nearest;
+    desc.filter = PickFilter(uiFilter, scale);
     desc.wrap = (uiWrapMode == GL_REPEAT) ? RHI::TexWrap::Repeat : RHI::TexWrap::Clamp;
     pNewBitmap->TextureNumber = RHI::CreateTexture(desc, pNewBitmap->Buffer).id;
 
@@ -748,6 +781,7 @@ bool CGlobalBitmap::OpenTga(GLuint uiBitmapIndex, const std::wstring& filename, 
 
     const int Width = NextPowerOfTwo(nx, MAX_WIDTH);
     const int Height = NextPowerOfTwo(ny, MAX_HEIGHT);
+    const int scale = ValidUpscale(ReadUpscaleMarker(pakBuffer), Width, Height);
 
     auto pNewBitmap = std::make_unique<BITMAP_t>();
 
@@ -756,8 +790,8 @@ bool CGlobalBitmap::OpenTga(GLuint uiBitmapIndex, const std::wstring& filename, 
     wcsncpy(pNewBitmap->FileName, filename.c_str(), MAX_BITMAP_FILE_NAME - 1);
     pNewBitmap->FileName[MAX_BITMAP_FILE_NAME - 1] = L'\0';
 
-    pNewBitmap->Width = static_cast<float>(Width);
-    pNewBitmap->Height = static_cast<float>(Height);
+    pNewBitmap->Width = static_cast<float>(Width / scale);
+    pNewBitmap->Height = static_cast<float>(Height / scale);
     pNewBitmap->Components = 4;
     pNewBitmap->Ref = 1;
 
@@ -787,7 +821,7 @@ bool CGlobalBitmap::OpenTga(GLuint uiBitmapIndex, const std::wstring& filename, 
     RHI::TextureDesc desc;
     desc.width = Width;
     desc.height = Height;
-    desc.filter = (uiFilter == GL_LINEAR) ? RHI::TexFilter::Linear : RHI::TexFilter::Nearest;
+    desc.filter = PickFilter(uiFilter, scale);
     desc.wrap = (uiWrapMode == GL_REPEAT) ? RHI::TexWrap::Repeat : RHI::TexWrap::Clamp;
     pNewBitmap->TextureNumber = RHI::CreateTexture(desc, pNewBitmap->Buffer).id;
 

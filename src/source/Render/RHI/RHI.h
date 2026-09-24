@@ -102,7 +102,9 @@ void DestroyUniformBlock(BufferHandle);  // GLP-09: frees a slot reservation, no
 // claim originally rested on -- ZzzBMD.cpp's BindLightMaps() still uploads GL_RGB, fixed via
 // the same CPU-side 3->4 expansion already planned for GlobalBitmap.cpp's JPEG path
 // (alpha=255), not a second RHI format. This "RGBA8 always" contract is true tree-wide.
-enum class TexFilter { Nearest, Linear };
+// Trilinear = Linear plus a full mip chain and the driver's max anisotropy. Meant for textures
+// the GPU sees minified (world geometry, upscaled art); the mip chain is rebuilt on UpdateTexture.
+enum class TexFilter { Nearest, Linear, Trilinear };
 enum class TexWrap   { Clamp, Repeat };        // no Mirror in use
 struct TextureDesc { int width, height; TexFilter filter = TexFilter::Nearest; TexWrap wrap = TexWrap::Clamp; };
 TextureHandle CreateTexture(const TextureDesc&, const void* initialPixelsRGBA);
